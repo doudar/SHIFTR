@@ -18,4 +18,8 @@
 #define BLE_CONNECT_INTERVAL 1000
 #define BLE_CONNECT_TIMEOUT 10
 
+// Default WiFi AP settings when not configured
+#define DEFAULT_AP_SSID "SHIFTR-AP"
+#define DEFAULT_AP_PASSWORD "shiftr123"
+
 #endif

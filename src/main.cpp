@@ -4,7 +4,6 @@
 #include <Config.h>
 #include <DirConManager.h>
 #include <ESPmDNS.h>
-#include <ETH.h>
 #include <IotWebConf.h>
 #include <IotWebConfESP32HTTPUpdateServer.h>
 #include <IotWebConfUsing.h>
@@ -24,8 +23,8 @@ void handleWebServerDebug();
 
 bool isMDNSStarted = false;
 bool isBLEConnected = false;
-bool isEthernetConnected = false;
 bool isWiFiConnected = false;
+bool isDirConStarted = false;
 
 DNSServer dnsServer;
 WebServer webServer(WEB_SERVER_PORT);
@@ -51,16 +50,14 @@ void setup() {
   WiFi.onEvent(networkEvent);
   log_i("Network events initialized");
 
-  // initialize ethernet interface
-  ETH.begin();
-  log_i("Ethernet interface initialized");
-
   // initialize settings manager
   SettingsManager::initialize(&iotWebConf);
 
   // initialize wifi manager and web server
   iotWebConf.setStatusPin(WIFI_STATUS_PIN);
   iotWebConf.setConfigPin(WIFI_CONFIG_PIN);
+  iotWebConf.setWifiConnectionTimeoutMs(5000); // 5 seconds to connect
+  iotWebConf.setApTimeoutMs(0); // Keep AP running indefinitely if no WiFi configured
   iotWebConf.addParameterGroup(SettingsManager::getIoTWebConfSettingsParameterGroup());
   iotWebConf.setupUpdateServer(
       [](const char* updatePath) { updateServer.setup(&webServer, updatePath, SettingsManager::getUsername().c_str(), SettingsManager::getAPPassword().c_str()); },
@@ -123,53 +120,45 @@ void setup() {
   // set BTDeviceManager selected trainer device
   BTDeviceManager::setRemoteDeviceNameFilter(SettingsManager::getTrainerDeviceName());
 
-  // initialize MDNS
-  if (!MDNS.begin(Utils::getHostName().c_str())) {
-    log_e("Startup failed: Unable to start MDNS");
-    ESP.restart();
-  }
-  MDNS.setInstanceName(Utils::getDeviceName().c_str());
-  isMDNSStarted = true;
-  log_i("MDNS initialized");
-
-  // initialize DirCon manager
-  DirConManager::setServiceManager(&serviceManager);
-  if (!DirConManager::start()) {
-    log_e("Startup failed: Unable to start DirCon manager");
-    ESP.restart();
-  }
-  log_i("DirCon Manager initialized");
-
   log_i("Startup finished");
 }
 
 void loop() {
   BTDeviceManager::update();
-  DirConManager::update();
+  
+  // Only start WiFi-dependent services after WiFi is connected
+  if (isWiFiConnected) {
+    // Initialize MDNS if not already started
+    if (!isMDNSStarted) {
+      if (MDNS.begin(Utils::getHostName().c_str())) {
+        MDNS.setInstanceName(Utils::getDeviceName().c_str());
+        isMDNSStarted = true;
+        log_i("MDNS initialized");
+      }
+    }
+    
+    // Initialize DirCon manager if not already started
+    if (!isDirConStarted) {
+      DirConManager::setServiceManager(&serviceManager);
+      if (DirConManager::start()) {
+        isDirConStarted = true;
+        log_i("DirCon Manager initialized");
+      } else {
+        log_e("Failed to start DirCon manager");
+      }
+    }
+    
+    // Update DirCon manager only if started
+    if (isDirConStarted) {
+      DirConManager::update();
+    }
+  }
+  
   iotWebConf.doLoop();
 }
 
 void networkEvent(WiFiEvent_t event) {
   switch (event) {
-    case ARDUINO_EVENT_ETH_START:
-      log_d("Ethernet started");
-      ETH.setHostname(Utils::getHostName().c_str());
-      break;
-    case ARDUINO_EVENT_ETH_CONNECTED:
-      log_i("Ethernet connected");
-      break;
-    case ARDUINO_EVENT_ETH_GOT_IP:
-      log_i("Ethernet DHCP successful with IP %u.%u.%u.%u", ETH.localIP()[0], ETH.localIP()[1], ETH.localIP()[2], ETH.localIP()[3]);
-      isEthernetConnected = true;
-      break;
-    case ARDUINO_EVENT_ETH_DISCONNECTED:
-      log_i("Ethernet disconnected");
-      isEthernetConnected = false;
-      break;
-    case ARDUINO_EVENT_ETH_STOP:
-      log_d("Ethernet stopped");
-      isEthernetConnected = false;
-      break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       log_i("WiFi DHCP successful with IP %u.%u.%u.%u", WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
       isWiFiConnected = true;
@@ -361,16 +350,6 @@ void handleWebServerStatus() {
 
   json += "\"hostname\": \"";
   json += Utils::getFQDN().c_str();
-  json += "\",";
-
-  json += "\"ethernet_status\": \"";
-  if (isEthernetConnected) {
-    json += "Connected";
-    json += ", IP: ";
-    json += ETH.localIP().toString();
-  } else {
-    json += "Not connected";
-  }
   json += "\",";
 
   json += "\"wifi_status\": \"";
